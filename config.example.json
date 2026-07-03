@@ -1,0 +1,19 @@
+{
+    "mail_api": "https://mail.jackishere.my.id/api/new_address",
+    "mail_domains": [
+        "jackishere.web.id",
+        "jackishere.my.id",
+        "maryjane.web.id"
+    ],
+    "proxy": null,
+    "headless": false,
+    "max_accounts": 10,
+    "delay_between_accounts": 300,
+    "retry_attempts": 3,
+    "token_name": "workers-ai-auto",
+    "token_permissions": [
+        "Workers AI"
+    ],
+    "token_expiry": "no-expiration",
+    "output_file": "results.json"
+}
