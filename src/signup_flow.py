@@ -1,12 +1,17 @@
 """
 Cloudflare Signup Flow — Automated account creation via headless browser.
 
-Handles:
-1. Navigate to sign-up page
-2. Fill email + password
-3. Solve Turnstile CAPTCHA
-4. Submit form
-5. Extract Account ID from redirect URL
+CF Protection Layers (July 2026):
+  L1: JS Challenge  → handled by stealth browser args (nodriver)
+  L2: Turnstile      → handled by verify_cf()
+  L3: Managed Challenge → requires human click (detected, logged)
+  L4: Rate Limit     → detected, requires IP rotation
+
+IMPORTANT: L1 bypass requires these browser args:
+  --disable-blink-features=AutomationControlled
+  --disable-features=ChromeWhatsNewUI
+  --user-agent=Chrome 150 UA
+Without them, CF shows "Just a moment..." interstitial.
 """
 
 import asyncio
@@ -15,10 +20,19 @@ from typing import Optional
 
 import nodriver as uc
 
-from .turnstile_bypass import verify_cf, is_turnstile_present
+from .turnstile_bypass import verify_cf, is_turnstile_present, is_managed_challenge, is_rate_limited
 
 
 CLOUDFLARE_SIGNUP_URL = "https://dash.cloudflare.com/sign-up"
+
+# Required browser flags for JS Challenge bypass (July 2026)
+STEALTH_BROWSER_ARGS = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-features=ChromeWhatsNewUI",
+    "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+]
 
 
 class SignupResult:
@@ -50,6 +64,15 @@ class SignupResult:
         }
 
 
+async def start_stealth_browser(headless: bool = True) -> tuple:
+    """Start nodriver with anti-detection flags that bypass CF JS Challenge."""
+    browser = await uc.start(
+        headless=headless,
+        browser_args=STEALTH_BROWSER_ARGS,
+    )
+    return browser
+
+
 async def signup(
     page: uc.Tab,
     email: str,
@@ -61,7 +84,7 @@ async def signup(
     Execute the Cloudflare signup flow.
 
     Args:
-        page: nodriver Tab (already navigated to sign-up or will navigate)
+        page: nodriver Tab (already navigated or will navigate)
         email: Email address for the new account
         password: Password for the new account
         max_wait: Max seconds to wait for redirect after submit
@@ -74,8 +97,22 @@ async def signup(
     await page.get(CLOUDFLARE_SIGNUP_URL)
     await asyncio.sleep(8)
 
+    # ---- Phase 0: Verify page loaded (JS Challenge bypassed by stealth flags) ----
+    title = await page.evaluate("document.title")
+    if "Just a moment" in title:
+        print("    ⚠️ JS Challenge still active — stealth flags may need update")
+        return SignupResult(False, email=email, error="JS Challenge not bypassed")
+
+    # Check rate limit before proceeding
+    if await is_rate_limited(page):
+        return SignupResult(False, email=email,
+                          error="Rate limited: IP flagged, try residential proxy")
+
     # Fill email
     email_input = await page.select('input[name="email"]', timeout=15)
+    if not email_input:
+        await asyncio.sleep(8)
+        email_input = await page.select('input[name="email"]', timeout=10)
     if not email_input:
         return SignupResult(False, email=email, error="Email input not found")
     await email_input.click()
@@ -101,15 +138,21 @@ async def signup(
     if turnstile_present:
         try:
             token = await verify_cf(page, timeout=60)
-            print(f"    ✅ Turnstile solved: {token[:20]}...")
+            if token:
+                print(f"    ✅ Turnstile solved: {token[:20]}...")
+            else:
+                print("    ⚠️ verify_cf returned empty")
         except (TimeoutError, RuntimeError) as e:
             if retry_turnstile:
-                # Retry once
                 await asyncio.sleep(5)
                 try:
                     token = await verify_cf(page, timeout=60)
                     print(f"    ✅ Turnstile solved (retry): {token[:20]}...")
                 except Exception as e2:
+                    # Check if it's actually a managed challenge
+                    if await is_managed_challenge(page):
+                        return SignupResult(False, email=email,
+                            error="Managed challenge: requires human intervention")
                     return SignupResult(False, email=email, error=f"Turnstile failed: {e2}")
             else:
                 return SignupResult(False, email=email, error=f"Turnstile failed: {e}")
@@ -129,7 +172,7 @@ async def signup(
         url = await page.evaluate("location.href")
         if "/sign-up" not in url:
             break
-    await asyncio.sleep(10)  # Extra wait for dashboard to load
+    await asyncio.sleep(10)
 
     # Extract Account ID from URL
     url = await page.evaluate("location.href")
@@ -137,11 +180,8 @@ async def signup(
     if match:
         account_id = match.group(1)
         return SignupResult(
-            True,
-            email=email,
-            password=password,
-            account_id=account_id,
-            page_url=url,
+            True, email=email, password=password,
+            account_id=account_id, page_url=url,
         )
 
     # Check for error messages
