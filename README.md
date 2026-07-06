@@ -135,6 +135,7 @@ cp config.example.json config.json
 #
 # 🔑 Butuh temp-mail? Daftar gratis di:
 # 👉 https://mocasus.my.id/temp-mail
+# 📖 API Docs: https://mocasus.my.id/docs-temp
 
 # Single account
 DISPLAY=:99 python3 main.py
