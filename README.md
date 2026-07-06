@@ -132,6 +132,9 @@ cd signup_from_scratch
 cp config.example.json config.json
 # Edit config.json → set "mail_api" to "http://localhost:9877/new_address"
 # Default domains: moymoy.me, moyqris.me, kintole.com, gmilio.web.id
+#
+# 🔑 Butuh temp-mail? Daftar gratis di:
+# 👉 https://mocasus.my.id/temp-mail
 
 # Single account
 DISPLAY=:99 python3 main.py
