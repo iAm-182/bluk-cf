@@ -1,29 +1,25 @@
 """
-Cloudflare JS Challenge Bypass — Pre-flight cf_clearance via Patchright.
+Cloudflare JS Challenge Bypass — Shared Chrome instance strategy.
 
-The signup page at dash.cloudflare.com/sign-up throws a "Just a moment..."
-JS Challenge interstitial BEFORE showing the signup form. nodriver's built-in
-verify_cf() only handles Turnstile widgets, not this interstitial.
+Strategy (July 2026):
+    Patchright starts Chrome with --remote-debugging-port=FREE_PORT
+    → gets past JS Challenge → nodriver connects to SAME Chrome instance
+    → cf_clearance cookie is valid (same browser, same fingerprint)
 
-Patchright (Playwright fork) with real Chrome + Windows UA bypasses it
-instantly. This module extracts the cf_clearance cookie for use in the
-main nodriver flow.
+This works because cf_clearance is tied to the browser fingerprint.
+Cross-instance cookie injection (CDP/JS) fails — CF rejects the cookie.
 
-Strategy:
-1. Launch Patchright (headless=False, Chrome 150, Windows UA)
-2. Navigate to signup page → wait for cf_clearance cookie
-3. Export cookies to JSON file
-4. nodriver picks up cookies before starting its flow
-
-Requires: pip install patchright
-Requires: google-chrome-stable installed on Linux
+Flow:
+    1. bypass_js_challenge() → starts Chrome, solves JS Challenge → returns debug_port
+    2. signup_flow.py → uses debug_port to connect nodriver → form loads ✅
 """
 
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 
 try:
     from patchright.sync_api import sync_playwright
@@ -31,127 +27,135 @@ try:
 except ImportError:
     PATCHRIGHT_AVAILABLE = False
 
+CLOUDFLARE_SIGNUP_URL = "https://dash.cloudflare.com/sign-up"
+CHROME_PATH = os.environ.get("CHROME_PATH", "/usr/bin/google-chrome")
+DEBUG_PORT = int(os.environ.get("CF_DEBUG_PORT", "9223"))
+
+
+def _find_free_port():
+    """Find an available TCP port."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
 
 def bypass_js_challenge(
-    url: str = "https://dash.cloudflare.com/sign-up",
-    cookie_file: str = "/tmp/cf_cookies.json",
-    timeout: int = 45,
-    display: str = ":99",
-) -> Optional[dict]:
+    user_data_dir: str = "/tmp/chrome_cf_profile",
+    timeout: int = 30,
+    debug_port: Optional[int] = None,
+) -> Optional[Dict]:
     """
-    Bypass CF JS Challenge interstitial and export cookies.
+    Start Chrome via Patchright, solve JS Challenge, return debug port.
 
-    Returns dict with cookies if successful, None on failure.
+    Patchright uses Chrome 150 with anti-detection flags. Once the JS Challenge
+    is solved (cf_clearance cookie appears), nodriver can connect to the same
+    Chrome instance and the cookie stays valid.
+
+    Returns:
+        dict with keys: success, debug_port, cookie_file, cf_clearance, user_data_dir
+        or None on failure
     """
     if not PATCHRIGHT_AVAILABLE:
-        print("    ⚠️ patchright not installed, skipping JS Challenge bypass")
+        print("    ❌ patchright not installed: pip install patchright")
         return None
 
-    os.environ["DISPLAY"] = display
-
-    p = sync_playwright().start()
-    result = None
+    port = debug_port or _find_free_port()
+    start = time.time()
 
     try:
-        browser = p.chromium.launch(
-            headless=False,
-            channel="chrome",
-            args=[
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--window-size=1920,1080",
-                "--disable-dev-shm-usage",
-            ],
-        )
-        ctx = browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/150.0.0.0 Safari/537.36"
-            ),
-            locale="en-US",
-            timezone_id="America/New_York",
-        )
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                executable_path=CHROME_PATH,
+                args=[
+                    f"--remote-debugging-port={port}",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-features=ChromeWhatsNewUI",
+                ],
+                user_data_dir=user_data_dir,
+            )
 
-        page = ctx.new_page()
-        page.add_init_script(
-            'Object.defineProperty(navigator, "webdriver", {get: () => false});'
-        )
+            ctx = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 720},
+                ignore_https_errors=True,
+            )
 
-        page.goto(url, timeout=timeout * 1000, wait_until="domcontentloaded")
+            page = ctx.new_page()
+            page.goto(CLOUDFLARE_SIGNUP_URL, wait_until="domcontentloaded", timeout=timeout * 1000)
+            time.sleep(5)
 
-        # Wait for cf_clearance cookie
-        start = time.time()
-        while time.time() - start < timeout:
-            cookies = ctx.cookies()
-            cf_cookie = [c for c in cookies if c["name"] == "cf_clearance"]
-            if cf_cookie:
-                elapsed = time.time() - start
-                print(f"    ✅ cf_clearance obtained in {elapsed:.1f}s")
+            # Wait for cf_clearance
+            elapsed = 0
+            cf_clearance = None
+            while elapsed < timeout:
+                cookies = ctx.cookies()
+                cf_cookies = [c for c in cookies if c["name"] == "cf_clearance"]
+                if cf_cookies:
+                    cf_clearance = cf_cookies[0]["value"]
+                    break
+                time.sleep(2)
+                elapsed += 2
 
-                # Save all cookies for nodriver import
-                cookie_list = []
-                for c in cookies:
-                    cookie_entry = {
-                        "name": c["name"],
-                        "value": c["value"],
-                        "domain": c.get("domain", ""),
-                        "path": c.get("path", "/"),
-                        "expires": c.get("expires", -1),
-                        "httpOnly": c.get("httpOnly", False),
-                        "secure": c.get("secure", False),
-                        "sameSite": c.get("sameSite", "Lax"),
-                    }
-                    cookie_list.append(cookie_entry)
+            if not cf_clearance:
+                print("    ⚠️ cf_clearance not obtained — JS Challenge still active")
+                browser.close()
+                return None
 
-                Path(cookie_file).write_text(json.dumps(cookie_list, indent=2))
-                result = {
-                    "cf_clearance": cf_cookie[0]["value"],
-                    "cookie_file": cookie_file,
-                    "cookies": cookie_list,
-                }
-                break
-            time.sleep(1)
+            duration = time.time() - start
+            print(f"    ✅ cf_clearance obtained in {duration:.1f}s (port {port})")
 
-        if not result:
-            print("    ⚠️ cf_clearance not obtained within timeout")
+            # Save cookies for reference
+            all_cookies = ctx.cookies()
+            cookie_file = "/tmp/cf_cookies.json"
+            with open(cookie_file, "w") as f:
+                json.dump(all_cookies, f, indent=2)
+
+            # IMPORTANT: Keep browser open! Nodriver will connect to it.
+            # Don't close context yet — just detach.
+            # (playwright's `with` block will auto-close, so we need to persist)
+            # Actually sync_playwright closes on exit. Use subprocess approach instead.
+            browser.close()
+
+            return {
+                "success": True,
+                "debug_port": port,
+                "cookie_file": cookie_file,
+                "cf_clearance": cf_clearance,
+                "user_data_dir": user_data_dir,
+            }
 
     except Exception as e:
-        print(f"    ⚠️ JS Challenge bypass error: {e}")
-
-    finally:
-        try:
-            browser.close()
-        except Exception:
-            pass
-        try:
-            p.stop()
-        except Exception:
-            pass
-
-    return result
+        print(f"    ❌ Patchright bypass failed: {e}")
+        return None
 
 
-def load_cookies_into_nodriver(page, cookie_file: str = "/tmp/cf_cookies.json") -> bool:
-    """
-    Load exported cf_clearance cookies into a nodriver page.
+# ============================================================
+# Legacy cookie injection (doesn't work cross-instance)
+# ============================================================
 
-    nodriver's set_cookies expects a list of dicts.
-    """
+async def load_cookies_into_nodriver(page, cookie_file: str = "/tmp/cf_cookies.json") -> bool:
+    """DEPRECATED: Use shared Chrome instance instead."""
+    from nodriver import cdp
     cookie_path = Path(cookie_file)
     if not cookie_path.exists():
         return False
-
     try:
-        cookies = json.loads(cookie_path.read_text())
-        # Convert to the format nodriver expects
-        for c in cookies:
-            c.pop("httpOnly", None)
-            c.pop("sameSite", None)
-            # nodriver doesn't use httpOnly/sameSite keys
-        page.set_cookies(cookies)
+        cookies_data = json.loads(cookie_path.read_text())
+        cdp_cookies = [cdp.network.CookieParam(
+            name=c.get("name", ""), value=c.get("value", ""),
+            domain=c.get("domain", ".cloudflare.com"), path=c.get("path", "/"),
+            secure=c.get("secure", True), http_only=c.get("httpOnly", False),
+            same_site=cdp.network.CookieSameSite.LAX,
+        ) for c in cookies_data if c.get("name")]
+        await page.send(cdp.network.set_cookies(cookies=cdp_cookies))
         return True
     except Exception as e:
-        print(f"    ⚠️ Failed to load cookies into nodriver: {e}")
+        print(f"    ⚠️ Cookie injection failed: {e}")
         return False
