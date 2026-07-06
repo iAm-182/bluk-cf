@@ -10,6 +10,34 @@
 
 ---
 
+## ✅ Public Release Notes
+
+This repository is intended for **authorized automation, testing, and research** only. It was tested end-to-end on a Linux VPS with Xvfb, Chrome, compatible temp-mail API, and residential proxy support.
+
+Before running at scale, make sure you understand these requirements:
+
+| Requirement | Why it matters |
+|---|---|
+| Compatible temp-mail API | Fresh Cloudflare accounts must verify email before token creation works |
+| Residential/clean proxy | Datacenter/VPS IPs can be rate-limited or blocked by Cloudflare signup |
+| Xvfb + Chrome | nodriver needs a real browser/display session |
+| Secure local storage | `results.json` contains generated passwords, JWTs, and API tokens |
+| Responsible usage | Only automate accounts you own or are authorized to create/manage |
+
+Do **not** commit or share:
+
+```text
+config.json
+results.json
+*.txt exports containing cfut_ tokens
+proxy credentials
+GitHub tokens / PATs
+```
+
+These files are gitignored by default, but you should still review your local changes before every push.
+
+---
+
 ## 🎯 What This Tool Does
 
 This tool automates the **entire lifecycle** of creating Cloudflare accounts with Workers AI access:
@@ -270,11 +298,18 @@ cloudflare-auto-signup/
 
 ## 🔒 Security Notes
 
-- **`config.json`** contains your mail API URL — **gitignored by default**
-- **`results.json`** contains passwords and API tokens — **gitignored by default**
-- **Proxy credentials** should use environment variables in production
-- **Temp emails** are disposable — no PII is stored
-- **API tokens** have Workers AI permissions only — minimal privilege
+- **`config.json`** contains live mail/proxy settings — **gitignored by default**
+- **`results.json`** contains generated passwords, mailbox JWTs, account IDs, and API tokens — **gitignored by default**
+- **TXT exports** contain full `cfut_` tokens and should be treated as secrets
+- **Proxy credentials** should be stored locally only, never in commits/issues/screenshots
+- **GitHub tokens / PATs** should be revoked if pasted in chat or terminal history
+- **API tokens** are scoped to Workers AI permissions only; revoke them from Cloudflare if exposed
+- Before publishing changes, run a secret scan such as:
+
+```bash
+git ls-files -z | xargs -0 grep -InE 'ghp_|cfut_|proxy|password|api[_-]?key|token|jwt' || true
+git status --ignored --short
+```
 
 ---
 
