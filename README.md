@@ -51,23 +51,17 @@ This tool automates the **entire lifecycle** of creating Cloudflare accounts wit
 | [**Google Chrome**](https://www.google.com/chrome/) | Stable | Browser engine for automation |
 | [**Xvfb**](https://www.x.org/releases/X11R7.6/doc/man/man1/Xvfb.1.xhtml) | — | Virtual framebuffer for headless display |
 
-### How Turnstile Bypass Works
+### How Turnstile Handling Works
 
-Cloudflare Turnstile runs inside a **cross-origin sandboxed iframe**. Standard automation tools (Selenium, Playwright, Puppeteer) **cannot** interact with it because:
-- The iframe is sandboxed — CDP click events are blocked
-- JavaScript cannot reach into cross-origin iframes
-- The checkbox requires **OS-level mouse input**
+This project uses nodriver's built-in Cloudflare helper:
 
-**Our solution:**
-1. Take a screenshot of the browser viewport
-2. Use **OpenCV template matching** to locate the checkbox
-3. Calculate absolute screen coordinates
-4. Execute an **OS-level mouse click** via nodriver's `mouse_click()`
-5. Poll for the `cf-turnstile-response` hidden input
+```python
+await page.verify_cf()
+```
 
-This works because `mouse_click()` sends CDP `Input.dispatchMouseEvent` events that reach the **X11 display server** — bypassing the iframe sandbox entirely.
+The helper drives the Cloudflare/Turnstile challenge from the browser session and avoids brittle image-template or OS-click logic. Keep the same authenticated `page` object after signup; opening a fresh tab/browser can lose dashboard session state.
 
-**Requires:** `xvfb-run` to provide a virtual display server (required in headless environments).
+**Requires:** `xvfb-run` to provide a virtual display server in VPS/headless environments. When running as root, browser startup uses `sandbox=False`.
 
 ---
 
@@ -310,8 +304,9 @@ This tool is provided for **educational and security research purposes only**. U
 | `ConnectionRefusedError` for mail API | Mail server is down or wrong URL | Check `mail_api` in config, verify server is running |
 | `Email failed: 422` / `400` | Domain not supported by mail API | Make sure your mail API has the domains in `mail_domains` |
 | `You are unable to sign up at this time` | **Rate limited** — too many signups from same IP | Wait 2-6 hours, or use a proxy (`-p http://user:pass@host:port`) |
-| `Turnstile checkbox not found` | OpenCV template mismatch or screenshot failed | Make sure `turnstile_checkbox.png` exists, or try with `--headless` off first |
-| `Token creation failed: Review button not found` | Dashboard page didn't load fully | Increase wait time, check if browser was logged in properly |
+| `Turnstile failed` / challenge timeout | Proxy/IP blocked or nodriver helper could not complete | Rotate to a fresh residential proxy, then retry |
+| `email_not_verified` | Cloudflare blocks token creation until email verification | Ensure your temp-mail API exposes `/parsed_mails` and returns the Cloudflare verification email |
+| `Token creation failed` | Email verification/API call failed or dashboard session expired | Check logs for `email_verify_error`, confirm `mail_api` and proxy health |
 | `cf_clearance cookie is TLS-fingerprint-bound` | Using `curl_cffi` outside Camoufox | This tool uses nodriver (full browser), not `curl_cffi` — this shouldn't occur |
 | `Xvfb not found` | Missing virtual display | `apt install -y xvfb` then run with `xvfb-run` |
 | `nodriver not found` | Python dependency missing | `pip install -r requirements.txt` |
@@ -403,6 +398,12 @@ xvfb-run --auto-servernum python main.py -n 5 -p "http://user:pass@host:port"
 
 # Custom output file
 xvfb-run --auto-servernum python main.py -n 10 -o my_accounts.json
+
+# Export valid keys for 9Router while running
+xvfb-run --auto-servernum python main.py -n 10 --export-txt keys.txt
+
+# Add exported keys to local 9Router
+python scripts/add_to_9router.py -i keys.txt
 ```
 
 ### Step 5: Check Results

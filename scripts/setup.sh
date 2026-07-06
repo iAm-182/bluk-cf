@@ -33,6 +33,11 @@ if [ -f requirements.txt ]; then
     pip install -r requirements.txt
 fi
 
+# Install Playwright browser for optional 9Router bulk-add helper
+if command -v playwright &> /dev/null; then
+    playwright install chromium || true
+fi
+
 # Create config if not exists
 if [ ! -f config.json ]; then
     cp config.example.json config.json
